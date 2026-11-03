@@ -1,0 +1,6 @@
+name = "P4Spec"
+version = "0.1.0"
+defaultTargets = ["P4Spec"]
+
+[[lean_lib]]
+name = "P4Spec"

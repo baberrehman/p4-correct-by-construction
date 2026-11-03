@@ -9,6 +9,13 @@ Research record and an ECOOP 2026 (LIPIcs) draft that develops the idea in Yuan 
 - `research/related-work.md` is the literature map with the sources actually used.
 - `research/p4c-comparison.md` compares p4c commit `98fbc63` with the model. `research/examples/` holds the programs that p4c accepts and the model rejects.
 - `paper/` is a LIPIcs v2021.1.3 draft (`main.tex`, `refs.bib`, and the official class files). ECOOP 2026 proceedings use this format. The draft’s author is Baber Rehman. The class option `anonymous` is the double-anonymous submission switch.
+- `lean/` is a Lean 4 mechanization of the calculus: header and table languages, inclusion, skeletons, and the examples from the draft. It is not a p4c pass.
+
+Build the Lean development from `lean/`:
+
+```bash
+lake build
+```
 
 ## What this study is
 
