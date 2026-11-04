@@ -45,9 +45,9 @@ A second, smaller result falls out of the same semantics. On the acyclic fragmen
 - No p4c pass was written.
 - No corpus was measured. The Princeton Cabernet citation in the short paper is a motivation for the three table relations, not a count of how often they occur.
 - No bug is claimed beyond the two illustrative mistakes already in the FMANO note, plus the same mistakes re-checked against the definitions below.
-- Proofs are informal arguments about the definitions. They are not mechanized.
+- The acyclic fragment, its metatheory, and the workshop examples are mechanized in Lean 4 under `lean/`. The proofs are not an embedding in Petr4, and there is no p4c pass.
 - Header stacks, `lookahead`, `verify`, parser exceptions, value sets, direct application of tables from actions, and control-plane constraints are out of scope. Each one changes either the trace alphabet or the control-flow graph.
 
 ## Consequences for the draft
 
-The ECOOP draft in `paper/` states inclusion as the conformance relation, defines `→` as a miss guard, limits the metalanguage to acyclic concatenation and union, treats select as nondeterministic, and labels the checker and the skeleton translation as unimplemented. The case studies are hand executions of the FMANO examples.
+The ECOOP draft in `paper/` states inclusion as the conformance relation, defines `→` as a miss guard, limits the metalanguage to acyclic concatenation and union, and treats select as nondeterministic. Section `Mechanization in Lean` is the Lean development. The case studies are the examples module, discharged by computation. A p4c pass is still future work.

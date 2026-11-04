@@ -19,7 +19,7 @@ lake build
 
 ## What this study is
 
-A pen-and-paper design. The short paper says an implementation in p4c is future work. Nothing here is a compiler pass, a measured evaluation, or a bug-finding campaign. Case studies are the examples from the short paper, checked by hand against the definitions.
+A grammatical specification and a Lean 4 mechanization of the acyclic fragment (`lean/`, `lake build`). The short paper says an implementation in p4c is future work. Nothing here is a compiler pass, a measured evaluation, or a bug-finding campaign. Case studies are the examples from the short paper, discharged by computation in `P4Spec/Examples.lean`.
 
 Build the draft from `paper/`:
 

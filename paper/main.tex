@@ -13,7 +13,7 @@
 \ccsdesc[300]{Software and its engineering~Formal methods}
 \ccsdesc[100]{Theory of computation~Grammars and context-free languages}
 
-\keywords{P4, programmable data planes, grammatical specifications, static analysis}
+\keywords{P4, programmable data planes, grammatical specifications, static analysis, Lean}
 
 \relatedversiondetails{Workshop note}{https://doi.org/10.1145/3750022.3750458}
 
@@ -43,9 +43,10 @@ Conformance is language inclusion.
 On an acyclic fragment of parsers and apply blocks, inclusion is decided by enumerating paths, treating every \texttt{select} arm as feasible.
 Acceptance implies that every concrete trace in the fragment lies in the specification, because the enumerated language over-approximates the packet language.
 The same semantics yields a parser skeleton whose nondeterministic language equals the grammar; discriminators for alternation remain holes, because the grammar does not contain them.
-The development is pen-and-paper.
+The definitions, the metatheory, and the case studies are mechanized in Lean~4.
+The mechanization is the semantics of this fragment.
 It is not a p4c pass and it reports no measurements.
-The case studies are hand executions of the examples that motivated the notation.
+The case studies are the examples that motivated the notation, each discharged by computation against those definitions.
 \end{abstract}
 
 \section{Introduction}
@@ -125,8 +126,9 @@ The default arm is kept, because every \texttt{select} arm is treated as feasibl
 A parser that extracts TCP only after IPv4 or IPv6 conforms.
 The same discipline applies to tables.
 If the specification says a fallback table may run only when an earlier table misses, an apply block that runs it on a hit is a well-typed P4 program and a trace outside the grammar.
-Section~\ref{sec:cases} checks both examples by hand.
-Section~\ref{sec:p4c} records why the compiler does not.
+Section~\ref{sec:lean} is the Lean development of this model.
+Section~\ref{sec:cases} records the examples as theorems of that development.
+Section~\ref{sec:p4c} records why the compiler does not reject them.
 
 A short workshop note proposed to write this check as a grammar attached to the program~\cite{yuan2025fmano}.
 The programmer attaches a grammar to a parser and a second grammar to an apply block.
@@ -137,8 +139,9 @@ The compiler is supposed to reject an implementation path that the grammar does 
 The note cites correctness-by-construction~\cite{dijkstra1976,morgan1994,kourie2012} and leaves an implementation in the reference compiler~\cite{p4c} as future work.
 It does not define the operators, and its examples are checks of an existing program rather than derivations of one.
 
-This paper supplies the missing definitions and states what a checker for them would be entitled to claim.
-The contribution is a specification language and a conformance relation, not a tool and not an evaluation.
+This paper supplies the missing definitions, states what a checker for them would be entitled to claim, and mechanizes both in Lean~4~\cite{lean4}.
+The contribution is a specification language, a conformance relation, and a machine-checked development of that relation.
+It is not a compiler pass and it is not an evaluation.
 
 \begin{itemize}
 \item We define header grammars and table grammars whose languages are finite sets of words.
@@ -152,11 +155,24 @@ The contribution is a specification language and a conformance relation, not a t
   The nondeterministic skeleton matches the grammar exactly.
   Filling a hole can only remove traces.
 \item We place the design next to solver-based verifiers, SafeP4-style type systems, and certified parser equivalence, and we list the P4 constructs the fragment refuses rather than silently ignores.
+\item We mechanize the fragment in Lean~4.
+  Languages are computed by structural recursion.
+  Soundness, monotonicity of arm deletion, the skeleton equality, and the filling corollary are theorems.
+  The workshop examples are theorems discharged by computation.
 \end{itemize}
 
-Section~\ref{sec:overview} walks through the examples.
+The same check is not the decision made by the closest existing tools.
+Aquila can write a header sequence as a precondition on one packet and discharge the surrounding assertions with an SMT solver~\cite{aquila}.
+Leapfrog and Octopus decide whether two parsers are equivalent~\cite{leapfrog,octopus}.
+p4v, Vera, and ASSERT-P4 can be given an assertion that forbids one bad trace~\cite{p4v,vera,assertp4}.
+p4tv can say that a table is hit, as a predicate in a temporal formula over a sequence of packets~\cite{p4ltl}.
+What we decide is inclusion of the parser's paths, and of the apply block's hit/miss traces, in a grammar whose miss-guard admits its continuation only after a miss.
+That inclusion, and the examples that motivate it, are theorems of the Lean development.
+
+Section~\ref{sec:overview} introduces parsers and table application, the programs the existing language accepts, and the check that rejects those programs.
 Sections~\ref{sec:spec}--\ref{sec:skeleton} give the languages, the extraction, the inclusion check, header validity, and skeletons.
-Section~\ref{sec:cases} executes the examples by hand.
+Section~\ref{sec:lean} presents the Lean model and records where it matches those sections.
+Section~\ref{sec:cases} is the checked examples.
 Section~\ref{sec:p4c} compares those decisions with the checks in the reference compiler.
 Section~\ref{sec:related} compares related systems.
 Section~\ref{sec:limits} records what is not claimed.
@@ -164,51 +180,118 @@ Section~\ref{sec:limits} records what is not claimed.
 \section{Overview}
 \label{sec:overview}
 
-A parser specification is an expression in header names.
-The expression
+\subsection{Parsers and table application in P4}
+
+A P4 parser is a state machine~\cite{p4langspec,bosshart2014p4}.
+A state extracts one or more headers and then takes a transition.
+\texttt{transition select} branches on a field already extracted, such as an EtherType or a protocol number, and each arm names the next state.
+\texttt{transition accept} ends a successful parse.
+The headers extracted along the path to \texttt{accept} are the packet that ingress sees.
+A header instance stays invalid until some state extracts it.
+On architectures that enforce validity, a field read of an invalid header is a runtime error.
+
+The ingress control then applies match-action tables.
+\texttt{t.apply()} looks the current packet up in table \(t\) and yields hit or miss, according to the entries installed by the control plane.
+The program tests that result and chooses the next application.
+A pipeline often applies one of two opening tables, then a later table, and a fallback table when the later table misses.
+\texttt{apply} itself records only that a table was consulted.
+The surrounding \texttt{if} records which branch was taken.
+Any table may appear on either branch.
+
+\subsection{Where existing programs go wrong}
+
+P4 accepts every extraction sequence the state machine can reach, and every order of applications the control block can reach.
+The reference compiler accepts the same programs~\cite{p4c}.
+That is a correct reading of the language.
+The architecture a programmer has in mind is a further statement, and neither the parser nor the apply block has a place to write it down.
+Section~\ref{sec:p4c} is the reading of the passes.
+Two programs from the workshop note show what is missing.
+
+The parser in Section~\ref{sec:motivating} extracts Ethernet and, on the default arm, extracts TCP.
+The packets the switch should accept start with Ethernet, continue with one IP version, and end with TCP or UDP.
+TCP does not sit directly on Ethernet.
+The program is well typed: \texttt{extract} is applied to a header, and \texttt{parse\_tcp} reaches \texttt{accept}, so the compiler keeps the arm.
+The word on that arm is \(\mathit{Ether}\,\mathit{TCP}\).
+Ingress can then read \texttt{hdr.tcp}, because the header was extracted and is valid in the P4 sense.
+The error is the sequence of headers.
+
+Table application has the same shape of error.
+Suppose the pipeline should apply table \(A\) or table \(B\), then table \(C\), and should apply the fallback \(D\) only when \(C\) misses.
+The following block is ordinary P4.
+\begin{lstlisting}[basicstyle=\scriptsize\ttfamily,columns=fullflexible,keepspaces=true,
+  aboveskip=0.7em,belowskip=0.55em,xleftmargin=1.4em,framesep=0pt,frame=none]
+if (A.apply().hit) {
+    if (C.apply().hit) {
+        D.apply();
+    }
+}
+\end{lstlisting}
+On a hit of \(A\) followed by a hit of \(C\) it applies \(D\).
+The compiler desugars \texttt{apply().hit} and does not constrain which table may follow which.
+The trace \(\mathrm{hit}(A)\,\mathrm{hit}(C)\,\mathrm{hit}(D)\) is an execution of a legal program, and it is the wrong pipeline.
+
+Header validity is a third view of the parser error.
+No intended packet carries both IPv4 and IPv6.
+An ingress block that reads a field of each header, with no test between the reads, is still accepted.
+The compiler tracks each validity bit on its own.
+Two headers that the architecture says cannot occur together are not an error in the language.
+
+\subsection{How this model removes the error}
+
+The P4 program stays as it is.
+The programmer attaches a grammar as a comment, in the form of the workshop note~\cite{yuan2025fmano}, and the check rejects an implementation trace that the grammar does not contain.
+Header names are the terminals of a parser grammar.
+Table names are the terminals of an apply grammar.
+Conformance is inclusion, so an extra path fails and a missing alternative still passes.
+Sections~\ref{sec:spec}--\ref{sec:lean} define the languages.
+The examples below are theorems of the Lean development, discharged by computation.
+
+For the parser, the comment is
 \[
-  \mathit{Ether} \mathbin{\&} (\mathit{IPV4} \mid \mathit{IPV6}) \mathbin{\&} (\mathit{TCP} \mid \mathit{UDP})
+  \mathit{Ether} \mathbin{\&} (\mathit{IPV4} \mid \mathit{IPV6}) \mathbin{\&} (\mathit{TCP} \mid \mathit{UDP}).
 \]
-denotes four words.
-Each word starts with Ethernet, continues with one IP version, and ends with one transport header.
-The corresponding P4 parser is a state machine whose transitions extract those headers.
-One faulty transition extracts \texttt{TCP} in a state that has only extracted \texttt{Ether}.
-The word \(\mathit{Ether}\,\mathit{TCP}\) is not in the grammar, so the parser does not conform.
+The expression denotes four words, each Ethernet, then one IP version, then one transport header.
+\(\mathit{Ether}\,\mathit{TCP}\) is not among them, so the default arm fails conformance and the illegal sequence is rejected.
+A parser that reaches TCP and UDP only after IPv4 or IPv6 has exactly those four words and conforms.
+Deleting both UDP arms leaves a smaller set of words, still inside the four, and that parser conforms too.
+The check has removed the faulty arm.
+A program that implements only some of the specified alternatives still passes, which is the reading forced by the original examples.
+A nonterminal makes the same concatenation modular.
+Binding \(\mathit{L3}\) to \(\mathit{IPV4} \mid \mathit{IPV6}\), and writing Ethernet, then \(\mathit{L3}\), then TCP or UDP, resolves to the same four words.
+Calling the transport parser before \(\mathit{L3}\) produces a word that skips the IP header, and that word fails membership.
 
-The same idea factors through sub-parsers.
-A nonterminal \(\mathit{L3}\) bound to \(\mathit{IPV4} \mid \mathit{IPV6}\) is a name for that alternation.
-The top-level specification \(\mathit{L2} \mathbin{\&} \mathit{L3} \mathbin{\&} \mathit{L4}\) is the concatenation of the three languages.
-A parser that calls the three sub-parsers in that order conforms.
-A parser that calls \(\mathit{L4}\) before \(\mathit{L3}\) does not.
+The same four words repair the validity error, once inclusion has succeeded.
+No word contains both \(\mathit{IPV4}\) and \(\mathit{IPV6}\), and every word contains \(\mathit{Ether}\).
+An unguarded read of both IP headers is then unjustified.
+An unguarded read of Ethernet is justified.
+If the TCP-after-Ethernet arm is still present, inclusion has failed, and the grammar is not a bound on the headers a packet can validate.
 
-Header validity falls out of the same four words.
-No word contains both \(\mathit{IPV4}\) and \(\mathit{IPV6}\).
-A control block that reads a field of each header, with no intervening test, assumes a packet the grammar has already excluded.
-
-Tables use a different alphabet.
-An application has an outcome, hit or miss, because the fallback operator mentions the miss.
-The specification
+For tables, the comment is
 \[
-  (A \mid B) \Rightarrow (C \rightarrow D)
+  (A \mid B) \Rightarrow (C \rightarrow D).
 \]
-says: apply \(A\) or \(B\), then apply \(C\), and apply \(D\) only if \(C\) missed.
-An apply block that applies \(D\) on the hit branch of \(C\) has a trace the grammar does not contain.
-An apply block that omits \(D\) entirely is still inside the grammar, because a hit of \(C\) is a complete trace.
-That asymmetry is deliberate.
-It is what the original rejected program shows, and it is not the same statement as ``\(D\) must run when \(C\) misses.''
+The program applies \(A\) or \(B\), then \(C\), and the arrow admits \(D\) only after a miss of \(C\).
+A hit of \(C\) is already a complete trace, so a pipeline that omits \(D\) still conforms.
+The block above produces \(\mathrm{hit}(A)\,\mathrm{hit}(C)\,\mathrm{hit}(D)\).
+That trace is outside the grammar, so the block fails and the fallback-on-hit branch is rejected.
+The repaired block chooses \(A\) or \(B\).
+On every outcome of the chosen table it applies \(C\), and it applies \(D\) only in the miss branch of \(C\).
+\begin{lstlisting}[basicstyle=\scriptsize\ttfamily,columns=fullflexible,keepspaces=true,
+  aboveskip=0.7em,belowskip=0.55em,xleftmargin=1.4em,framesep=0pt,frame=none]
+if (C.apply().hit) {} else {
+    D.apply();
+}
+\end{lstlisting}
+Every trace of that block sits in the grammar, so the block conforms.
+Applying \(A\) and then \(B\) before \(C\) fails as well.
+Alternation is a choice of one opening table, and the trace that contains both is excluded.
 
-Two readings are easy to confuse with this one, and both are worse fits.
-Equivalence would require the implementation to realize every word, so deleting the UDP arm would be an error.
-The note never rejects a missing arm.
-A temporal ``eventually'' reading of \(\Rightarrow\) would allow unrelated tables between \(A\) and \(C\).
-Nothing in the examples needs that extra room, and the header operator \(\&\) is plainly concatenation.
-We use concatenation for both.
-
-The grammar does not contain the expression that chooses IPv4 rather than IPv6.
-A checker that deleted an arm because it could not prove the arm feasible would be unsound: a feasible offending arm might be the one deleted.
-The checker therefore keeps every arm.
-It may alarm on an arm no packet takes.
-It does not accept a feasible arm outside the grammar.
+Two further choices keep the check from letting the error back in.
+The operators are concatenation.
+A reading that allowed arbitrary tables between \(A\) and \(C\) would accept pipelines this grammar excludes.
+The grammar does not contain the EtherType expression that chooses IPv4 rather than IPv6, so every \texttt{select} arm is kept.
+An arm that no packet takes may raise an alarm.
+A feasible arm whose word lies outside the grammar fails the check.
 
 \section{Specification languages}
 \label{sec:spec}
@@ -298,6 +381,7 @@ For every header specification and every table specification in the fragment, th
 Header languages are built from singletons by union and concatenation, under an acyclic environment.
 Table languages are built the same way, with \(\mathrm{Hits}\) and \(\mathrm{Misses}\) selecting subsets.
 No constructor adds a Kleene star.
+Section~\ref{sec:lean} makes the bound explicit: every word of an expression has length at most the rank of that expression, and the language is the list the semantics returns.
 \end{proof}
 
 \section{From programs to traces}
@@ -327,6 +411,7 @@ A word is the sequence of header labels along a path from the start to an accept
 If the graph contains a cycle, extraction fails and reports that the program is outside the fragment.
 It does not unroll the cycle a fixed number of times.
 A fixed unrolling would be an under-approximation and could hide a forbidden header on a later iteration.
+The Lean syntax of Section~\ref{sec:lean} is the inductive image of these graphs: a cycle is not a term, and a cyclic specification comment is rejected when name resolution runs out of fuel.
 
 Discarding select keys enlarges \(\mathcal{L}(G)\) relative to the set of words a real packet can produce.
 That is the over-approximation discussed in Section~\ref{sec:overview}.
@@ -364,7 +449,8 @@ Membership of a word in \(\mathcal{L}(P)\) or \(\mathcal{L}(T)\) follows the equ
 The cost is linear in the number of paths, which is independent of header widths and of table sizes, and exponential in the worst case in the number of alternations.
 The specifications in the source proposal are short.
 The procedure is the one a compiler can run without a solver.
-It is not a procedure we have implemented.
+Section~\ref{sec:lean} implements it on the inductive fragment: the path language and the specification language are both lists, and inclusion is a finite Boolean check.
+A pass inside p4c remains future work.
 
 \begin{theorem}
 \label{thm:sound}
@@ -376,6 +462,9 @@ If \(G\) conforms to the specification, then every concrete trace is in the spec
 Conformance is \(\mathcal{L}(G) \subseteq \mathcal{L}(\mathit{spec})\).
 Every concrete trace is an element of \(\mathcal{L}(G)\) by the assumption.
 The assumption holds for the fragment because every \texttt{select} arm and every hit/miss branch is materialized as an edge, and because constructs that could hide a trace are rejected at extraction time rather than dropped.
+In Lean the theorem is transitivity of inclusion, stated separately for parsers and for apply graphs.
+The hypothesis that the concrete packet language sits inside the path language is an assumption of the theorem.
+It is not derived from a semantics of P4.
 \end{proof}
 
 Theorem~\ref{thm:sound} does not say the converse.
@@ -392,6 +481,11 @@ If \(G'\) is obtained from a conforming graph \(G\) by deleting edges, and extra
 \begin{proof}
 Deleting edges shrinks or preserves the path language.
 A subset of a subset of the specification is still a subset.
+In Lean the deletion relation is defined on parser graphs.
+An arm of a \texttt{select} may be dropped, and the continuation of an extraction may be trimmed.
+The relation is proved to shrink the path language, and conformance is preserved by transitivity.
+Apply graphs are not given a separate deletion relation in the development.
+The same subset argument applies once such a relation is written down.
 \end{proof}
 
 Proposition~\ref{prop:mono} is why the analysis is a filter on forbidden structure and not a test that the implementation realizes the architecture in full.
@@ -455,9 +549,12 @@ A name extracts one header.
 Concatenation of graphs concatenates languages, matching the equation for \(\&\).
 A hole-start is the union of the two branches, matching alternation.
 Nonterminals follow the environment, which is acyclic, so the induction is well-founded.
+The Lean statement is equality of languages up to membership: the skeleton of an expression and the expression denote the same words.
 \end{proof}
 
-A filling of the holes replaces each hole-edge by one or more \texttt{select} arms.
+A filling of the holes replaces each hole-edge by a list of \texttt{select} arms.
+Each arm is a filling of the left branch or of the right branch.
+The list may be empty, which deletes both branches.
 Any such replacement deletes the nondeterministic choices that the filler does not mention, or keeps them.
 It does not add a header extraction that the skeleton did not already contain, unless the programmer edits a state after generation.
 For fillings that only refine holes:
@@ -470,6 +567,7 @@ If \(G\) is a filling of \(\sem{P}\), then \(\mathcal{L}(G) \subseteq \mathcal{L
 \begin{proof}
 A filling's path language is a subset of the nondeterministic language.
 Theorem~\ref{thm:skel} equates that language with \(\mathcal{L}(P)\).
+The Lean proof is the corresponding inclusion, composed with the membership direction of the skeleton equality.
 \end{proof}
 
 Corollary~\ref{cor:fill} is the construct-then-preserve statement the workshop note does not make.
@@ -491,49 +589,193 @@ The grammar says the traces of \(A\) and of \(B\) are both legal and that a trac
 Several programs have exactly those traces.
 Choosing one of them is a programming step, not a consequence of \(\mathcal{L}(T)\).
 
+\section{Mechanization in Lean}
+\label{sec:lean}
+
+The development of Sections~\ref{sec:spec}--\ref{sec:skeleton} is a Lean~4 library~\cite{lean4}.
+The toolchain pin is Lean~4.35.0.
+The library is \texttt{P4Spec}, in the \texttt{lean/} directory of the companion sources, and \texttt{lake build} checks it.
+The modules follow the paper: languages, header specifications, table specifications, parser and apply graphs, skeletons, and the examples.
+The surface programs stay ordinary P4 with a specification comment, as in Section~\ref{sec:motivating}.
+Lean interprets that comment.
+It does not replace the P4 program, and it does not parse p4c's AST.
+
+\subsection{Languages}
+
+A name is a string.
+A language is a list of words.
+Two languages are equal when they have the same members, and one is included in the other when every member of the first is a member of the second.
+Order and duplicate entries in the list do not matter.
+Concatenation of languages is the list of all appends of a word from the left language with a word from the right language.
+Membership in a concatenation is the existence of such a split.
+These are the relations used in every theorem below.
+They are decidable, because a word is a finite list and a language is a finite list of them.
+
+\subsection{Header specifications}
+
+The acyclic syntax has four constructors.
+A header is a name.
+Sequencing and alternation are binary, and they are the operators \(\&\) and \(\mid\).
+A nonterminal stores its name and the body it denotes, so the body is a subterm.
+A cyclic binding is not a term of this syntax.
+The language equations are those of Section~\ref{sec:spec}: a header denotes the singleton word of length one, sequencing concatenates, alternation appends the two lists, and a nonterminal denotes the language of its body.
+
+The rank of an expression is \(1\) on a header, the sum of the ranks under sequencing, and the maximum under alternation.
+A nonterminal has the rank of its body.
+Every word in the language has length at most the rank.
+That is the mechanized form of the bound behind Proposition~\ref{prop:finite}.
+The language function returns a list, so the set of words is finite.
+
+The comment in the workshop note is a different syntax, with a variable in place of an embedded body.
+An environment is a list of name and body pairs.
+Resolution takes a fuel bound, the environment, and a term of that syntax, and returns an acyclic expression or failure.
+Fuel zero fails.
+A variable looks the name up and recurses on the body with one less fuel, then wraps the result as a nonterminal.
+An unknown name fails.
+A cycle exhausts the fuel: the environment that binds \(A\) to the variable \(A\), resolved at fuel \(4\), returns failure.
+The four-header specification of Example~\ref{ex:four}, with \(\mathit{L3}\) bound to \(\mathit{IPV4} \mid \mathit{IPV6}\), resolves at fuel \(6\).
+Fuel \(4\) is not enough for that term, because each constructor and each variable consumes one unit.
+The fuel is a bound on unfolding.
+It is not an unrolling of a parser loop.
+
+\subsection{Table specifications}
+
+Events are \(\mathrm{hit}(t)\) and \(\mathrm{miss}(t)\).
+A table expression is an atom, sequencing, a miss-guard, or alternation.
+A trace ends in a hit when its last event is a hit, and it ends in a miss when its last event is a miss.
+The empty trace does neither.
+The hitting traces and the missing traces are the filters of a language by those two tests.
+The language equations are those of Section~\ref{sec:spec}.
+An atom denotes the two singleton traces.
+Sequencing concatenates.
+Alternation appends.
+A miss-guard keeps the hitting traces of its left operand and concatenates its right operand only onto the missing traces.
+The rank of a table expression adds under sequencing and under the miss-guard, and takes a maximum under alternation.
+Every trace has length at most that rank.
+
+\subsection{Parsers and apply graphs}
+
+A parser term is accept, reject, an extraction of a named header followed by a continuation, or a choice of a list of parsers.
+The choice is a \texttt{select} with the key discarded, so every arm is retained.
+Accept denotes the empty word.
+Reject denotes the empty language.
+Extraction prefixes its header onto every word of the continuation.
+A choice denotes the union of its arms.
+There is no constructor for a cycle.
+A loop is outside the fragment, which is the policy of Section~\ref{sec:extract}.
+
+An apply term is an exit, a branch on a table name with a hit continuation and a miss continuation, or a nondeterministic choice of two apply terms.
+Exit denotes the empty trace.
+A branch prefixes \(\mathrm{hit}(t)\) onto every trace of the hit continuation and \(\mathrm{miss}(t)\) onto every trace of the miss continuation.
+The nondeterministic choice is the conditional that applies no table.
+Both outgoing edges of an ignored table result are represented by giving the two continuations the same term.
+
+A parser conforms to a header specification when its path language is included in the specification language.
+An apply graph conforms to a table specification in the same way.
+Inclusion is decidable on these terms, and the examples of Section~\ref{sec:cases} are decided that way.
+
+\subsection{Metatheory}
+
+Soundness is transitivity of inclusion.
+If every concrete trace is in the path language, and the path language is included in the specification, then every concrete trace is in the specification.
+The statement is one theorem for parsers and one for apply graphs.
+They are Theorem~\ref{thm:sound}.
+The over-approximation hypothesis is an assumption.
+The development does not prove it from Petr4, and it does not prove a converse.
+A dead arm stays in the path language and can make inclusion fail.
+
+Monotonicity is proved for parsers.
+The deletion relation has six rules: accept and reject are related to themselves, an extraction is trimmed in its continuation, an empty choice stays empty, the head arm of a choice may be dropped, and the head arm may be kept while both that arm and the remaining arms are trimmed.
+Deletion shrinks the path language.
+A parser that conforms still conforms after deletion.
+That is Proposition~\ref{prop:mono}, and it is why dropping the UDP arm of a conforming parser leaves a conforming parser.
+Apply graphs have no deletion relation in the library.
+
+The skeleton of a header expression is an inductive term with three constructors: accept, extraction, and a hole with two branches.
+A header becomes an extraction that accepts.
+Sequencing concatenates skeletons by grafting the second onto every accept of the first.
+Alternation is a hole.
+A nonterminal is the skeleton of its body.
+Interpreting a hole as the union of its branches, the skeleton and the expression have the same language.
+That is Theorem~\ref{thm:skel}, proved by induction together with the concatenation lemma for grafting.
+
+A filling relates a skeleton to a parser.
+Accept fills accept.
+An extraction fills an extraction of the same header when the continuation fills.
+A hole fills a choice whose arms are built from the two branches: each arm is a filling of the left branch or of the right branch, and the list of arms may be empty.
+A filling's path language is included in the nondeterministic language of the skeleton, and therefore in the language of the expression.
+That is Corollary~\ref{cor:fill}.
+The filling does not invent an extraction.
+It can delete both sides of a hole.
+
+Header validity is computed on a language of words.
+A header is exclusive with another when no word contains both.
+A header is always valid when every word contains it.
+Both statements are decidable by walking the list.
+The four-word grammar of Example~\ref{ex:four} makes IPv4 and IPv6 exclusive, does not make Ethernet and TCP exclusive, makes Ethernet always valid, and does not make TCP always valid.
+The set of name-sets \(V(P)\) is defined as the names of each word.
+The exclusivity and always-valid facts are the statements the examples use.
+The development does not interpret \texttt{isValid} or a control-block syntax.
+
+\subsection{What the library checks, and what it leaves open}
+
+The library checks the definitions by the theorems above, and it checks the workshop examples by computation.
+It does not extract a parser term from a P4 source file.
+The translation rules of Section~\ref{sec:extract} remain the account of that step.
+It does not contain a p4c pass, a model of select keys, a model of table entries, or a deletion relation for apply graphs.
+A modular cache of a nonterminal's language is allowed by the equations and is not a separate procedure in the library.
+The sub-parser case in which a transport parser is inlined before the network parser is a consequence of the language equations.
+It is not a separate theorem.
+
 \section{Case studies}
 \label{sec:cases}
 
-The studies below are hand executions.
+The studies below are theorems in the examples module.
+Each membership and each inclusion is discharged by computation against the definitions of Section~\ref{sec:lean}.
 They use the examples of the workshop note~\cite{yuan2025fmano}.
-They are not runs of a tool, and they are not a sample of bugs in a corpus.
+They are not a sample of bugs in a corpus.
 
 \subsection{A forbidden parser arm}
 
 Take \(P\) from Example~\ref{ex:four} and a parser whose start state extracts \(\mathit{Ether}\) and then selects either a state that extracts \(\mathit{IPV4}\) or a state that extracts \(\mathit{TCP}\).
-Enumeration produces the words \(\mathit{Ether}\,\mathit{IPV4}\) and \(\mathit{Ether}\,\mathit{TCP}\), among any further suffixes those states extract.
-\(\mathit{Ether}\,\mathit{TCP}\) is not in \(\mathcal{L}(P)\).
+The path language contains \(\mathit{Ether}\,\mathit{TCP}\).
+That word is not in \(\mathcal{L}(P)\).
 Definition~\ref{def:conf} fails.
-The same graph with the TCP arm removed from the Ethernet state conforms only if every remaining word is one of the four.
-A later state that extracts TCP after IPv4 is fine.
-A state that extracts TCP after Ethernet is not.
+Both facts, and the failure of inclusion, are theorems discharged by computation.
+A parser that extracts Ethernet, then IPv4 or IPv6, and only then TCP or UDP, conforms.
+Deleting both UDP arms preserves conformance, by Proposition~\ref{prop:mono} applied to that parser.
+A state that extracts TCP after Ethernet does not.
 This is the distinction drawn by the comment in the workshop note, stated as membership.
 
 \subsection{Sub-parsers}
 
-Bind \(\mathit{L3} \mapsto \mathit{IPV4} \mid \mathit{IPV6}\) and likewise for \(\mathit{L2}\) and \(\mathit{L4}\), and let the top specification be \(\mathit{L2} \mathbin{\&} \mathit{L3} \mathbin{\&} \mathit{L4}\).
-Inlining three sub-parser calls in that order yields words in \(\mathcal{L}(P)\), provided each sub-parser conforms to its own binding.
+Bind \(\mathit{L3} \mapsto \mathit{IPV4} \mid \mathit{IPV6}\) and let the top specification be Ethernet, then \(\mathit{L3}\), then TCP or UDP.
+Resolution at fuel \(6\) returns the acyclic expression whose language is exactly the four words of Example~\ref{ex:four}.
 Inlining \(\mathit{L4}\) immediately after \(\mathit{L2}\) yields words that skip \(\mathit{L3}\).
-Those words fail membership.
+Those words fail membership by the same equations.
+That swapped program is not a separate theorem in the library.
 The nonterminal is doing real work: the check of the top parser does not need to see inside a sub-parser that has already been checked, as long as inlining uses the sub-parser's language rather than an unchecked body.
 A modular checker can cache \(\mathcal{L}(\Gamma(N))\).
-We have not implemented the cache.
-The equations allow it.
+The equations allow the cache.
+The library does not implement one.
 
 \subsection{Exclusive headers}
 
 Continuing from the conforming parser, \(V(P)\) contains \(\{\mathit{Ether},\mathit{IPV4},\mathit{TCP}\}\) and the three sibling sets, and no set contains both IP versions.
+Exclusivity of the two IP versions, failure of exclusivity for Ethernet and TCP, validity of Ethernet on every word, and failure of that fact for TCP are theorems discharged by computation.
 The straight-line reads of \texttt{hdr.ipv4.src} and \texttt{hdr.ipv6.src} are unjustified by Definition~\ref{def:mayvalid}.
 If the programmer inserts \texttt{isValid} tests, the definition does not apply, and this paper does not claim a result.
 That limit is preferable to a use-site analysis that pretends not to see the tests.
 
 \subsection{A fallback on the wrong branch}
 
-Take \(T\) from Example~\ref{ex:tables} and an apply block that applies \(A\) or \(B\), then applies \(D\) when \(C\) hits.
-One enumerated trace is \(\mathrm{hit}(A)\,\mathrm{hit}(C)\,\mathrm{hit}(D)\), which Example~\ref{ex:tables} excludes.
-The block that applies \(D\) only on the miss of \(C\) enumerates traces that the example includes, together with traces that end at \(\mathrm{hit}(C)\).
-All of those are in \(\mathcal{L}(T)\).
-The block that applies \(A\) and then \(B\) before \(C\) is rejected, even though both tables occur ``at the start'' in an informal sense.
+Take \(T\) from Example~\ref{ex:tables}.
+The traces \(\mathrm{hit}(A)\,\mathrm{hit}(C)\) and \(\mathrm{hit}(A)\,\mathrm{miss}(C)\,\mathrm{hit}(D)\) are in \(\mathcal{L}(T)\).
+The traces \(\mathrm{hit}(A)\,\mathrm{hit}(C)\,\mathrm{hit}(D)\) and \(\mathrm{hit}(A)\,\mathrm{hit}(B)\,\mathrm{hit}(C)\) are not.
+Each of the four memberships is a theorem discharged by computation.
+An apply term that chooses \(A\) or \(B\), and on every outcome applies \(D\) only on the miss of \(C\), conforms.
+An apply term that applies \(D\) on the hit branch of \(C\) does not.
+The block that applies \(A\) and then \(B\) before \(C\) is rejected by the membership above, even though both tables occur ``at the start'' in an informal sense.
 Alternation is union, not a multiset of opening tables.
 
 \subsection{What these studies do not show}
@@ -665,13 +907,13 @@ The rest of this section says what each system actually consumes, and why a head
 Analysis & Question & Needs \\
 \hline
 p4c~\cite{p4c} & Is the program well-typed P4? & The P4 text \\
-p4v~\cite{p4v} & Do assertions about headers, tables, and state hold? & Control-plane annotations, solver \\
-Vera~\cite{vera} & Do symbolic SEFL paths violate checks? & A translation of the program \\
-ASSERT-P4~\cite{assertp4} & Do symbolic C paths violate assertions? & Assertions in the program \\
+p4v~\cite{p4v}, Vera~\cite{vera}, ASSERT-P4~\cite{assertp4} & Do assertions hold on symbolic paths? & Annotations, a solver or executor \\
+Aquila~\cite{aquila} & Does this packet, under these entries, meet the stated intent? & A header-sequence precondition, SMT \\
 SafeP4~\cite{safep4}, dependent types~\cite{depp4} & Are header and mask operations well typed? & A type derivation \\
-Leapfrog~\cite{leapfrog} & Are two parsers equivalent? & A second parser, a proof \\
+Leapfrog~\cite{leapfrog}, Octopus~\cite{octopus} & Are two parsers equivalent? & A second parser \\
+p4tv~\cite{p4ltl} & Does every packet sequence satisfy a temporal formula? & A formula over many packets \\
 Gauntlet~\cite{gauntlet} & Does the compiler miscompile? & Generated programs \\
-This paper & Is every fragment trace in the grammar? & A short grammar \\
+This paper & Is every fragment trace inside the grammar? & A short grammar \\
 \hline
 \end{tabular}
 \end{table}
@@ -680,7 +922,9 @@ This paper & Is every fragment trace in the grammar? & A short grammar \\
 
 P4 separates parsing from match-action control and makes both programmable~\cite{bosshart2014p4,p4langspec}.
 The language specification fixes the meaning of \texttt{extract}, \texttt{select}, header validity, and \texttt{apply().hit}.
-It does not fix which header sequences a given program is supposed to accept, and it does not fix the order in which that program's tables are supposed to run.
+It describes a parser as the account of the header sequences a packet may contain~\cite{p4langspec}.
+That account is the program itself.
+The specification does not provide a second, smaller description against which the program is checked, and it does not fix the order in which that program's tables are supposed to run.
 Those are properties of one program, not of the language.
 The BNF in the P4 specification is the concrete syntax of parser declarations.
 It is not a grammar of packet headers.
@@ -750,14 +994,16 @@ Table order is control structure, and SafeP4 leaves control structure to the pro
 \subsection{Semantics and parser equivalence}
 
 Petr4 supplies a definitional interpreter for P4 and a core calculus with a proof of type-preserving termination~\cite{petr4}.
-It is the semantic account a mechanized version of Theorem~\ref{thm:sound} should be stated against.
+Section~\ref{sec:lean} mechanizes the fragment's own syntax and proves Theorem~\ref{thm:sound} there, as transitivity of inclusion under an over-approximation hypothesis.
+Petr4 is the semantic account against which that hypothesis should eventually be proved.
 Petr4 does not take a programmer-written grammar of header words or of table traces.
 Our extraction is not a function on Petr4's syntax.
-Until it is, the theorem is conditional on Section~\ref{sec:extract}.
+Until it is, the hypothesis of Theorem~\ref{thm:sound} stays conditional on Section~\ref{sec:extract}.
 
 Leapfrog proves equivalence of two protocol parsers~\cite{leapfrog}.
 The model is automata.
 The proof is a bisimulation, discharged with SMT for the bit-vector side conditions, and the metatheory is in Coq.
+Octopus checks the same relation for the same parser subset, in a tool that reads p4c's representation and returns either a bisimulation or a distinguishing bit-stream~\cite{octopus}.
 Equivalence is the right theorem when a reference parser already exists.
 It is stronger than inclusion, and it is the wrong shape of specification when the reference is a three-line grammar rather than a second implementation.
 A grammar is easier to write than a reference parser and weaker as a definition of the protocol: it says which header names occur and in which order, not which bits select the arm.
@@ -775,6 +1021,31 @@ We do not use one analysis to test the other.
 Section~\ref{sec:p4c} is not a Gauntlet-style bug hunt.
 It is a reading of passes that already run, and of the programs those passes accept.
 
+\subsection{Header sequences already written down}
+
+Aquila's specification language, LPI, contains a header-sequence expression~\cite{aquila}.
+A sequence is a list of header names.
+Brackets mark an optional header, and a parenthesized bar marks alternatives.
+The expression appears as a precondition on one packet, written as an equality on that packet's header order, and the checker asks an SMT solver whether the program and its table entries meet the surrounding assertions.
+Aquila's own comparison lists header order among the parser properties it can decide.
+The decision is a verification condition for the packets and entries under consideration.
+It is not inclusion of every path of the parser in a grammar, and the language has no operator whose continuation is admitted only on a table miss.
+A trace such as \(\mathrm{hit}(A)\,\mathrm{hit}(C)\,\mathrm{hit}(D)\) is not a word that LPI excludes by the meaning of an expression.
+It is a situation an assertion can be written to forbid, one annotation at a time.
+
+p4tv checks temporal properties of stateful P4 programs across a sequence of packets~\cite{p4ltl}.
+Its atomic predicates include a table hit.
+The time step is the end of one packet's processing, and the specification is an LTL formula.
+That is a different trace from the hit/miss word of a single apply block.
+A formula can say that a table is hit on this packet.
+It does not define the finite language of \((A \mid B) \Rightarrow (C \rightarrow D)\).
+
+EverParse compiles a description of a binary message format to a parser that is verified to invert serialization~\cite{everparse}.
+The artifact is the parser, and the property is about bits, memory safety, and non-malleability.
+The same direction, deriving an implementation from a format, is taken by other verified binary parsers.
+Section~\ref{sec:skeleton} derives only a P4 control skeleton, and the holes are exactly the select discriminators those format compilers exist to fill in.
+A format compiler does not read an existing P4 apply block, and it does not have a miss-guard.
+
 \subsection{Where this paper starts}
 
 Fixed-function network verification checks reachability and forwarding invariants of a configured network.
@@ -791,7 +1062,11 @@ Correctness-by-construction derives a program from a specification so that confo
 Section~\ref{sec:skeleton} is the part of this paper that does that, and only for parser control, up to holes for \texttt{select}.
 The inclusion check is not correctness-by-construction.
 It is a check of a program that was written first, which is what the examples in the note actually do.
-The contribution relative to the note is the trace semantics, the statement that conformance is inclusion, the reading of the miss-guard, and the account of why p4c, Vera, and ASSERT-P4 do not already decide that inclusion.
+The contribution relative to the note, and relative to the systems above, is the trace semantics of that notation, the statement that conformance is inclusion of an over-approximating path language, the reading of the miss-guard, and the Lean development of that fragment.
+Aquila can name a header sequence.
+Leapfrog and Octopus can compare two parsers.
+p4v, Vera, and ASSERT-P4 can be given an assertion that forbids one bad trace.
+None of them decides inclusion of the parser's paths, and of the apply block's hit/miss traces, in a grammar of this shape.
 
 \section{Limitations}
 \label{sec:limits}
@@ -816,15 +1091,19 @@ The workshop note listed that implementation as future work, and it remains futu
 Section~\ref{sec:p4c} is a reading of the passes p4c does run.
 It is not a count of alarms or of bugs on a corpus.
 
-A mechanized proof would interpret the fragment inside Petr4 and prove Theorem~\ref{thm:sound} there.
-That would also fix the extraction, which is the least formal part of this paper: it is a list of translation rules rather than a function defined on Petr4's syntax.
+The fragment's syntax, its languages, inclusion, the skeleton translation, the filling corollary, and the examples are mechanized in Lean (Section~\ref{sec:lean}).
+Theorem~\ref{thm:sound} is proved there as transitivity of inclusion.
+The hypothesis that every concrete trace lies in the path language is not proved from Petr4.
+A proof that interprets P4 inside Petr4 and shows the path language over-approximates Petr4's traces remains future work.
+That proof would also replace the translation rules of Section~\ref{sec:extract} by a function on Petr4's syntax.
 
 \section{Conclusion}
 \label{sec:conc}
 
 A grammatical specification of header sequences and table pipelines is small enough to sit next to a P4 program and precise enough to define.
 On an acyclic fragment, conformance is inclusion of an over-approximating path language in a finite trace language, the miss-guard means ``only if missed,'' and a parser skeleton matches the grammar up to holes for \texttt{select}.
-Those statements are what the workshop proposal needs before a compiler pass can be honest about what it checks.
+Those statements, and the examples that motivated them, are theorems in a Lean development of the fragment.
+They are what the workshop proposal needs before a compiler pass can be honest about what it checks.
 The reference compiler accepts the extra parser arm and the fallback-on-hit pipeline, and its invalid-header warning is suppressed by a mention of \texttt{isValid}, including on the branch where the header is invalid.
 They do not subsume solver-based verification or header type systems.
 They describe the architectural check those systems were not built to be.

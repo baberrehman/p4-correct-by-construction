@@ -20,6 +20,8 @@ def four : HExpr :=
 
 theorem compile_four : compile 6 topEnv topRaw = some four := by decide
 
+theorem compile_four_short_fuel : compile 4 topEnv topRaw = none := by decide
+
 def fourWords : Lang Name :=
   [ ["Ether", "IPV4", "TCP"],
     ["Ether", "IPV4", "UDP"],
